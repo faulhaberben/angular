@@ -10,5 +10,7 @@
 </ul>
 
 <!-- #docregion hero-detail-binding -->
-<app-hero-detail [hero]="selectedHero"></app-hero-detail>
+<ng-container *ngIf="selectedHero">
+  <app-hero-detail [hero]="selectedHero"></app-hero-detail>
+<ng-container>
 <!-- #enddocregion hero-detail-binding -->
