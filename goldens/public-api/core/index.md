@@ -25,6 +25,31 @@ export interface AfterContentInit {
 }
 
 // @public
+export function afterNextRender(callback: VoidFunction, options?: AfterRenderOptions): AfterRenderRef;
+
+// @public
+export function afterRender(callback: VoidFunction, options?: AfterRenderOptions): AfterRenderRef;
+
+// @public
+export interface AfterRenderOptions {
+    injector?: Injector;
+    phase?: AfterRenderPhase;
+}
+
+// @public
+export enum AfterRenderPhase {
+    EarlyRead = 0,
+    MixedReadWrite = 2,
+    Read = 3,
+    Write = 1
+}
+
+// @public
+export interface AfterRenderRef {
+    destroy(): void;
+}
+
+// @public
 export interface AfterViewChecked {
     ngAfterViewChecked(): void;
 }
@@ -38,7 +63,7 @@ export interface AfterViewInit {
 export const ANIMATION_MODULE_TYPE: InjectionToken<"NoopAnimations" | "BrowserAnimations">;
 
 // @public
-export const APP_BOOTSTRAP_LISTENER: InjectionToken<((compRef: ComponentRef<any>) => void)[]>;
+export const APP_BOOTSTRAP_LISTENER: InjectionToken<readonly ((compRef: ComponentRef<any>) => void)[]>;
 
 // @public
 export const APP_ID: InjectionToken<string>;
@@ -202,7 +227,8 @@ export interface Component extends Directive {
     preserveWhitespaces?: boolean;
     schemas?: SchemaMetadata[];
     standalone?: boolean;
-    styles?: string[];
+    styles?: string | string[];
+    styleUrl?: string;
     styleUrls?: string[];
     template?: string;
     templateUrl?: string;
@@ -225,6 +251,7 @@ export abstract class ComponentFactory<C> {
     abstract get inputs(): {
         propName: string;
         templateName: string;
+        transform?: (value: any) => any;
     }[];
     abstract get ngContentSelectors(): string[];
     abstract get outputs(): {
@@ -246,6 +273,7 @@ export interface ComponentMirror<C> {
     get inputs(): ReadonlyArray<{
         readonly propName: string;
         readonly templateName: string;
+        readonly transform?: (value: any) => any;
     }>;
     get isStandalone(): boolean;
     get ngContentSelectors(): ReadonlyArray<string>;
@@ -543,7 +571,7 @@ export abstract class EmbeddedViewRef<C> extends ViewRef {
 export function enableProdMode(): void;
 
 // @public
-export const ENVIRONMENT_INITIALIZER: InjectionToken<() => void>;
+export const ENVIRONMENT_INITIALIZER: InjectionToken<readonly (() => void)[]>;
 
 // @public
 export abstract class EnvironmentInjector implements Injector {
@@ -793,7 +821,7 @@ export abstract class Injector {
     // @deprecated (undocumented)
     static create(providers: StaticProvider[], parent?: Injector): Injector;
     static create(options: {
-        providers: StaticProvider[];
+        providers: Array<Provider | StaticProvider>;
         parent?: Injector;
         name?: string;
     }): Injector;
@@ -1034,15 +1062,12 @@ export class NgZone {
         shouldCoalesceEventChangeDetection?: boolean | undefined;
         shouldCoalesceRunChangeDetection?: boolean | undefined;
     });
-    // (undocumented)
     static assertInAngularZone(): void;
-    // (undocumented)
     static assertNotInAngularZone(): void;
     // (undocumented)
     readonly hasPendingMacrotasks: boolean;
     // (undocumented)
     readonly hasPendingMicrotasks: boolean;
-    // (undocumented)
     static isInAngularZone(): boolean;
     readonly isStable: boolean;
     readonly onError: EventEmitter<any>;
@@ -1111,7 +1136,7 @@ export interface OutputDecorator {
     new (alias?: string): any;
 }
 
-// @public
+// @public @deprecated
 export const PACKAGE_ROOT_URL: InjectionToken<string>;
 
 // @public
@@ -1140,7 +1165,7 @@ export interface PipeTransform {
 export const PLATFORM_ID: InjectionToken<Object>;
 
 // @public
-export const PLATFORM_INITIALIZER: InjectionToken<(() => void)[]>;
+export const PLATFORM_INITIALIZER: InjectionToken<readonly (() => void)[]>;
 
 // @public
 export const platformCore: (extraProviders?: StaticProvider[] | undefined) => PlatformRef;

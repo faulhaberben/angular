@@ -7,10 +7,12 @@
  */
 
 import {APP_INITIALIZER, ChangeDetectorRef, Compiler, Component, Directive, ElementRef, ErrorHandler, getNgModuleById, inject, Inject, Injectable, InjectFlags, InjectionToken, InjectOptions, Injector, Input, LOCALE_ID, ModuleWithProviders, NgModule, Optional, Pipe, Type, ViewChild, ɵsetClassMetadata as setClassMetadata, ɵɵdefineComponent as defineComponent, ɵɵdefineInjector as defineInjector, ɵɵdefineNgModule as defineNgModule, ɵɵelementEnd as elementEnd, ɵɵelementStart as elementStart, ɵɵsetNgModuleScope as setNgModuleScope, ɵɵtext as text} from '@angular/core';
+import {DeferBlockBehavior} from '@angular/core/testing';
 import {TestBed, TestBedImpl} from '@angular/core/testing/src/test_bed';
 import {By} from '@angular/platform-browser';
 import {expect} from '@angular/platform-browser/testing/src/matchers';
 
+import {setClassMetadataAsync} from '../src/render3/metadata';
 import {TEARDOWN_TESTING_MODULE_ON_DESTROY_DEFAULT, THROW_ON_UNKNOWN_ELEMENTS_DEFAULT, THROW_ON_UNKNOWN_PROPERTIES_DEFAULT} from '../testing/src/test_bed_common';
 
 const NAME = new InjectionToken<string>('name');
@@ -598,8 +600,8 @@ describe('TestBed', () => {
     fixture.detectChanges();
 
     const divElement = fixture.debugElement.query(By.css('div'));
-    expect(divElement.properties.id).toEqual('one');
-    expect(divElement.properties.title).toEqual('some title');
+    expect(divElement.properties['id']).toEqual('one');
+    expect(divElement.properties['title']).toEqual('some title');
   });
 
   it('should give the ability to access interpolated properties on a node', () => {
@@ -607,8 +609,8 @@ describe('TestBed', () => {
     fixture.detectChanges();
 
     const paragraphEl = fixture.debugElement.query(By.css('p'));
-    expect(paragraphEl.properties.title).toEqual('( some label - some title )');
-    expect(paragraphEl.properties.id).toEqual('[ some label ] [ some title ]');
+    expect(paragraphEl.properties['title']).toEqual('( some label - some title )');
+    expect(paragraphEl.properties['id']).toEqual('[ some label ] [ some title ]');
   });
 
   it('should give access to the node injector', () => {
@@ -646,7 +648,7 @@ describe('TestBed', () => {
     const withRefsCmp = TestBed.createComponent(WithRefsCmp);
     const firstDivDebugEl = withRefsCmp.debugElement.query(By.css('div'));
     // assert that a native element is referenced by a local ref
-    expect(firstDivDebugEl.references.firstDiv.tagName.toLowerCase()).toBe('div');
+    expect(firstDivDebugEl.references['firstDiv'].tagName.toLowerCase()).toBe('div');
   });
 
   it('should give the ability to query by directive', () => {
@@ -1460,6 +1462,127 @@ describe('TestBed', () => {
     });
   });
 
+  describe('defer blocks', () => {
+    /**
+     * Function returns a class that represents AOT-compiled version of the following Component:
+     *
+     * @Component({
+     *  standalone: true,
+     *  imports: [...],
+     *  selector: '...',
+     *  template: '...',
+     * })
+     * class ComponentClass {}
+     *
+     * This is needed to closer match the behavior of AOT pre-compiled components (compiled
+     * outside of TestBed) for cases when `{#defer}` blocks are used.
+     */
+    const getAOTCompiledComponent =
+        (selector: string, dependencies: Array<Type<unknown>> = [],
+         deferrableDependencies: Array<Type<unknown>> = []) => {
+          class ComponentClass {
+            static ɵfac = () => new ComponentClass();
+            static ɵcmp = defineComponent({
+              standalone: true,
+              type: ComponentClass,
+              selectors: [[selector]],
+              decls: 2,
+              vars: 0,
+              dependencies,
+              consts: [['dir']],
+              template:
+                  (rf: any, ctx: any) => {
+                    if (rf & 1) {
+                      elementStart(0, 'div', 0);
+                      text(1, `${selector} cmp!`);
+                      elementEnd();
+                    }
+                  }
+            });
+          }
+          setClassMetadataAsync(
+              ComponentClass,
+              function() {
+                const promises: Array<Promise<Type<unknown>>> = deferrableDependencies.map(
+                    // Emulates a dynamic import, e.g. `import('./cmp-a').then(m => m.CmpA)`
+                    dep => new Promise((resolve) => setTimeout(() => resolve(dep))));
+                return promises;
+              },
+              function(...deferrableSymbols) {
+                setClassMetadata(
+                    ComponentClass, [{
+                      type: Component,
+                      args: [{
+                        selector,
+                        standalone: true,
+                        imports: [...dependencies, ...deferrableSymbols],
+                        template: `<div>root cmp!</div>`,
+                      }]
+                    }],
+                    null, null);
+              });
+          return ComponentClass;
+        };
+
+    it('should handle async metadata on root and nested components', async () => {
+      @Component({
+        standalone: true,
+        selector: 'cmp-a',
+        template: 'CmpA!',
+      })
+      class CmpA {
+      }
+
+      const NestedAotComponent = getAOTCompiledComponent('nested-cmp', [], [CmpA]);
+      const RootAotComponent = getAOTCompiledComponent('root', [], [NestedAotComponent]);
+
+      TestBed.configureTestingModule({imports: [RootAotComponent]});
+
+      TestBed.overrideComponent(
+          RootAotComponent, {set: {template: `Override of a root template! <nested-cmp />`}});
+      TestBed.overrideComponent(
+          NestedAotComponent, {set: {template: `Override of a nested template! <cmp-a />`}});
+
+      await TestBed.compileComponents();
+
+      const fixture = TestBed.createComponent(RootAotComponent);
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.textContent)
+          .toBe('Override of a root template! Override of a nested template! CmpA!');
+    });
+
+    it('should allow import overrides on components with async metadata', async () => {
+      @Component({
+        standalone: true,
+        selector: 'cmp-a',
+        template: 'CmpA!',
+      })
+      class CmpA {
+      }
+
+      const NestedAotComponent = getAOTCompiledComponent('nested-cmp', [], []);
+      const RootAotComponent = getAOTCompiledComponent('root', [], []);
+
+      TestBed.configureTestingModule({imports: [RootAotComponent]});
+
+      TestBed.overrideComponent(RootAotComponent, {
+        set: {
+          // Adding an import that was not present originally
+          imports: [NestedAotComponent],
+          template: `Override of a root template! <nested-cmp />`,
+        }
+      });
+
+      await TestBed.compileComponents();
+
+      const fixture = TestBed.createComponent(RootAotComponent);
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.textContent)
+          .toBe('Override of a root template! nested-cmp cmp!');
+    });
+  });
 
   describe('AOT pre-compiled components', () => {
     /**
@@ -1909,6 +2032,27 @@ describe('TestBed', () => {
   });
 });
 
+describe('TestBed defer block behavior', () => {
+  beforeEach(() => {
+    TestBed.resetTestingModule();
+  });
+
+  it('should default defer block behavior to manual', () => {
+    expect(TestBedImpl.INSTANCE.getDeferBlockBehavior()).toBe(DeferBlockBehavior.Manual);
+  });
+
+  it('should be able to configure defer block behavior', () => {
+    TestBed.configureTestingModule({deferBlockBehavior: DeferBlockBehavior.Playthrough});
+    expect(TestBedImpl.INSTANCE.getDeferBlockBehavior()).toBe(DeferBlockBehavior.Playthrough);
+  });
+
+  it('should reset the defer block behavior back to the default when TestBed is reset', () => {
+    TestBed.configureTestingModule({deferBlockBehavior: DeferBlockBehavior.Playthrough});
+    expect(TestBedImpl.INSTANCE.getDeferBlockBehavior()).toBe(DeferBlockBehavior.Playthrough);
+    TestBed.resetTestingModule();
+    expect(TestBedImpl.INSTANCE.getDeferBlockBehavior()).toBe(DeferBlockBehavior.Manual);
+  });
+});
 
 describe('TestBed module teardown', () => {
   beforeEach(() => {
