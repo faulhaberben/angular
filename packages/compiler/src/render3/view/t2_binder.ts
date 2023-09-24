@@ -14,7 +14,6 @@ import {BoundTarget, DirectiveMeta, ReferenceTarget, ScopedNode, Target, TargetB
 import {createCssSelector} from './template';
 import {getAttrsForDirectiveMatching} from './util';
 
-
 /**
  * Processes `Target`s with a given set of directives and performs a binding operation, which
  * returns an object similar to TypeScript's `ts.TypeChecker` that contains knowledge about the
@@ -108,17 +107,16 @@ class Scope implements Visitor {
       // Process the nodes of the template.
       nodeOrNodes.children.forEach(node => node.visit(this));
     } else if (nodeOrNodes instanceof IfBlockBranch) {
-      // TODO(crisbeto): uncomment this when rebasing #51690.
-      // if (nodeOrNodes.expressionAlias !== null) {
-      //   this.visitVariable(nodeOrNodes.expressionAlias);
-      // }
+      if (nodeOrNodes.expressionAlias !== null) {
+        this.visitVariable(nodeOrNodes.expressionAlias);
+      }
       nodeOrNodes.children.forEach(node => node.visit(this));
     } else if (nodeOrNodes instanceof ForLoopBlock) {
-      // TODO(crisbeto): uncomment this when rebasing #51690.
-      // this.visitVariable(nodeOrNodes.item);
-      // Object.values(nodeOrNodes.contextVariables).forEach(v => this.visitVariable(v));
+      this.visitVariable(nodeOrNodes.item);
+      Object.values(nodeOrNodes.contextVariables).forEach(v => this.visitVariable(v));
       nodeOrNodes.children.forEach(node => node.visit(this));
     } else if (
+        nodeOrNodes instanceof SwitchBlockCase || nodeOrNodes instanceof ForLoopBlockEmpty ||
         nodeOrNodes instanceof DeferredBlock || nodeOrNodes instanceof DeferredBlockError ||
         nodeOrNodes instanceof DeferredBlockPlaceholder ||
         nodeOrNodes instanceof DeferredBlockLoading) {
@@ -180,7 +178,7 @@ class Scope implements Visitor {
   }
 
   visitSwitchBlockCase(block: SwitchBlockCase) {
-    block.children.forEach(node => node.visit(this));
+    this.ingestScopedNode(block);
   }
 
   visitForLoopBlock(block: ForLoopBlock) {
@@ -189,7 +187,7 @@ class Scope implements Visitor {
   }
 
   visitForLoopBlockEmpty(block: ForLoopBlockEmpty) {
-    block.children.forEach(node => node.visit(this));
+    this.ingestScopedNode(block);
   }
 
   visitIfBlock(block: IfBlock) {
@@ -418,9 +416,8 @@ class DirectiveBinder<DirectiveT extends DirectiveMeta> implements Visitor {
   }
 
   visitForLoopBlock(block: ForLoopBlock) {
-    // TODO(crisbeto): uncomment this when rebasing #51690.
-    // block.item.visit(this);
-    // Object.values(block.contextVariables).forEach(v => v.visit(this));
+    block.item.visit(this);
+    Object.values(block.contextVariables).forEach(v => v.visit(this));
     block.children.forEach(node => node.visit(this));
     block.empty?.visit(this);
   }
@@ -434,8 +431,7 @@ class DirectiveBinder<DirectiveT extends DirectiveMeta> implements Visitor {
   }
 
   visitIfBlockBranch(block: IfBlockBranch) {
-    // TODO(crisbeto): uncomment this when rebasing #51690.
-    // block.expressionAlias?.visit(this);
+    block.expressionAlias?.visit(this);
     block.children.forEach(node => node.visit(this));
   }
 
@@ -532,20 +528,19 @@ class TemplateBinder extends RecursiveAstVisitor implements Visitor {
       // Set the nesting level.
       this.nestingLevel.set(nodeOrNodes, this.level);
     } else if (nodeOrNodes instanceof IfBlockBranch) {
-      // TODO(crisbeto): uncomment this when rebasing #51690.
-      // if (nodeOrNodes.expressionAlias !== null) {
-      //   this.visitNode(nodeOrNodes.expressionAlias);
-      // }
+      if (nodeOrNodes.expressionAlias !== null) {
+        this.visitNode(nodeOrNodes.expressionAlias);
+      }
       nodeOrNodes.children.forEach(this.visitNode);
       this.nestingLevel.set(nodeOrNodes, this.level);
     } else if (nodeOrNodes instanceof ForLoopBlock) {
-      // TODO(crisbeto): uncomment this when rebasing #51690.
-      // this.visitNode(nodeOrNodes.item);
-      // Object.values(nodeOrNodes.contextVariables).forEach(v => this.visitNode(v));
+      this.visitNode(nodeOrNodes.item);
+      Object.values(nodeOrNodes.contextVariables).forEach(v => this.visitNode(v));
       nodeOrNodes.trackBy.visit(this);
       nodeOrNodes.children.forEach(this.visitNode);
       this.nestingLevel.set(nodeOrNodes, this.level);
     } else if (
+        nodeOrNodes instanceof SwitchBlockCase || nodeOrNodes instanceof ForLoopBlockEmpty ||
         nodeOrNodes instanceof DeferredBlock || nodeOrNodes instanceof DeferredBlockError ||
         nodeOrNodes instanceof DeferredBlockPlaceholder ||
         nodeOrNodes instanceof DeferredBlockLoading) {
@@ -644,7 +639,7 @@ class TemplateBinder extends RecursiveAstVisitor implements Visitor {
 
   visitSwitchBlockCase(block: SwitchBlockCase) {
     block.expression?.visit(this);
-    block.children.forEach(this.visitNode);
+    this.ingestScopedNode(block);
   }
 
   visitForLoopBlock(block: ForLoopBlock) {
@@ -654,7 +649,7 @@ class TemplateBinder extends RecursiveAstVisitor implements Visitor {
   }
 
   visitForLoopBlockEmpty(block: ForLoopBlockEmpty) {
-    block.children.forEach(this.visitNode);
+    this.ingestScopedNode(block);
   }
 
   visitIfBlock(block: IfBlock) {

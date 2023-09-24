@@ -33,7 +33,7 @@ import {Identifiers as R3} from '../r3_identifiers';
 import {htmlAstToRender3Ast} from '../r3_template_transform';
 import {prepareSyntheticListenerFunctionName, prepareSyntheticListenerName, prepareSyntheticPropertyName} from '../util';
 
-import {DeferBlockTemplateDependency} from './api';
+import {R3DeferBlockMetadata} from './api';
 import {I18nContext} from './i18n/context';
 import {createGoogleGetMsgStatements} from './i18n/get_msg_utils';
 import {createLocalizeStatements} from './i18n/localize_utils';
@@ -243,7 +243,8 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
       private templateIndex: number|null, private templateName: string|null,
       private _namespace: o.ExternalReference, relativeContextFilePath: string,
       private i18nUseExternalIds: boolean,
-      private deferBlocks: Map<t.DeferredBlock, DeferBlockTemplateDependency[]>,
+      private deferBlocks: Map<t.DeferredBlock, R3DeferBlockMetadata>,
+      private elementLocations: Map<t.Element, {index: number, level: number}>,
       private _constants: ComponentDefConsts = createComponentDefConsts()) {
     this._bindingScope = parentBindingScope.nestedScope(level);
 
@@ -665,6 +666,7 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
   visitElement(element: t.Element) {
     const elementIndex = this.allocateDataSlot();
     const stylingBuilder = new StylingBuilder(null);
+    this.elementLocations.set(element, {index: elementIndex, level: this.level});
 
     let isNonBindableMode: boolean = false;
     const isI18nRootElement: boolean =
@@ -943,7 +945,7 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
     const visitor = new TemplateDefinitionBuilder(
         this.constantPool, this._bindingScope, this.level + 1, contextName, this.i18n, index, name,
         this._namespace, this.fileBasedI18nSuffix, this.i18nUseExternalIds, this.deferBlocks,
-        this._constants);
+        this.elementLocations, this._constants);
 
     // Nested templates must not be visited until after their parent templates have completed
     // processing, so they are queued here until after the initial pass. Otherwise, we wouldn't
@@ -1153,8 +1155,10 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
       // If the branch has an alias, it'll be assigned directly to the container's context.
       // We define a variable referring directly to the context so that any nested usages can be
       // rewritten to refer to it.
-      const variables = expressionAlias ?
-          [new t.Variable(expressionAlias, DIRECT_CONTEXT_REFERENCE, sourceSpan, sourceSpan)] :
+      const variables = expressionAlias !== null ?
+          [new t.Variable(
+              expressionAlias.name, DIRECT_CONTEXT_REFERENCE, expressionAlias.sourceSpan,
+              expressionAlias.keySpan)] :
           undefined;
 
       return {
@@ -1279,6 +1283,12 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
 
   visitDeferredBlock(deferred: t.DeferredBlock): void {
     const {loading, placeholder, error, triggers, prefetchTriggers} = deferred;
+    const metadata = this.deferBlocks.get(deferred);
+
+    if (!metadata) {
+      throw new Error('Could not resolve `defer` block metadata. Block may need to be analyzed.');
+    }
+
     const primaryTemplateIndex =
         this.createEmbeddedTemplateFn(null, deferred.children, '_Defer', deferred.sourceSpan);
     const loadingIndex = loading ?
@@ -1311,7 +1321,7 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
         deferred.sourceSpan, R3.defer, trimTrailingNulls([
           o.literal(deferredIndex),
           o.literal(primaryTemplateIndex),
-          this.createDeferredDepsFunction(depsFnName, deferred),
+          this.createDeferredDepsFunction(depsFnName, metadata),
           o.literal(loadingIndex),
           o.literal(placeholderIndex),
           o.literal(errorIndex),
@@ -1319,25 +1329,23 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
           placeholderConsts ? this.addToConsts(placeholderConsts) : o.TYPED_NULL_EXPR,
         ]));
 
-    this.createDeferTriggerInstructions(deferredIndex, triggers, false);
-    this.createDeferTriggerInstructions(deferredIndex, prefetchTriggers, true);
+    this.createDeferTriggerInstructions(deferredIndex, triggers, metadata, false);
+    this.createDeferTriggerInstructions(deferredIndex, prefetchTriggers, metadata, true);
 
     // Allocate an extra data slot right after a defer block slot to store
     // instance-specific state of that defer block at runtime.
     this.allocateDataSlot();
   }
 
-  private createDeferredDepsFunction(name: string, deferred: t.DeferredBlock) {
-    const deferredDeps = this.deferBlocks.get(deferred);
-
-    if (!deferredDeps || deferredDeps.length === 0) {
+  private createDeferredDepsFunction(name: string, metadata: R3DeferBlockMetadata) {
+    if (metadata.deps.length === 0) {
       return o.TYPED_NULL_EXPR;
     }
 
     // This defer block has deps for which we need to generate dynamic imports.
     const dependencyExp: o.Expression[] = [];
 
-    for (const deferredDep of deferredDeps) {
+    for (const deferredDep of metadata.deps) {
       if (deferredDep.isDeferrable) {
         // Callback function, e.g. `m () => m.MyCmp;`.
         const innerFn = o.arrowFn(
@@ -1361,7 +1369,8 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
   }
 
   private createDeferTriggerInstructions(
-      deferredIndex: number, triggers: t.DeferredBlockTriggers, prefetch: boolean) {
+      deferredIndex: number, triggers: t.DeferredBlockTriggers, metadata: R3DeferBlockMetadata,
+      prefetch: boolean) {
     const {when, idle, immediate, timer, hover, interaction, viewport} = triggers;
 
     // `deferWhen(ctx.someValue)`
@@ -1400,13 +1409,37 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
           hover.sourceSpan, prefetch ? R3.deferPrefetchOnHover : R3.deferOnHover);
     }
 
-    // TODO(crisbeto): currently the reference is passed as a string.
-    // Update this once we figure out how we should refer to the target.
-    // `deferOnInteraction(target)`
+    // TODO: `deferOnInteraction(index, walkUpTimes)`
     if (interaction) {
-      this.creationInstruction(
-          interaction.sourceSpan, prefetch ? R3.deferPrefetchOnInteraction : R3.deferOnInteraction,
-          [o.literal(interaction.reference)]);
+      const instructionRef = prefetch ? R3.deferPrefetchOnInteraction : R3.deferOnInteraction;
+      const triggerEl = metadata.triggerElements.get(interaction);
+
+      // Don't generate anything if a trigger cannot be resolved.
+      // We'll have template diagnostics to surface these to users.
+      if (triggerEl) {
+        this.creationInstruction(interaction.sourceSpan, instructionRef, () => {
+          const location = this.elementLocations.get(triggerEl);
+
+          if (!location) {
+            throw new Error(
+                `Could not determine location of reference passed into ` +
+                `'interaction' trigger. Template may not have been fully analyzed.`);
+          }
+
+          // A negative depth means that the trigger is inside the placeholder.
+          // Cap it at -1 since we only care whether or not it's negative.
+          const depth = Math.max(this.level - location.level, -1);
+          const params = [o.literal(location.index)];
+
+          // The most common case should be a trigger within the view so we can omit a depth of
+          // zero. For triggers in parent views and in the placeholder we need to pass it in.
+          if (depth !== 0) {
+            params.push(o.literal(depth));
+          }
+
+          return params;
+        });
+      }
     }
 
     // TODO(crisbeto): currently the reference is passed as a string.
@@ -1427,13 +1460,9 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
     // Allocate one slot for the repeater metadata. The slots for the primary and empty block
     // are implicitly inferred by the runtime to index + 1 and index + 2.
     const blockIndex = this.allocateDataSlot();
-    const primaryData = this.prepareEmbeddedTemplateFn(block.children, '_For', [
-      new t.Variable(block.itemName, '$implicit', block.sourceSpan, block.sourceSpan),
-      new t.Variable(
-          getLoopLocalName(block, '$index'), '$index', block.sourceSpan, block.sourceSpan),
-      new t.Variable(
-          getLoopLocalName(block, '$count'), '$count', block.sourceSpan, block.sourceSpan),
-    ]);
+    const primaryData = this.prepareEmbeddedTemplateFn(
+        block.children, '_For',
+        [block.item, block.contextVariables.$index, block.contextVariables.$count]);
     const emptyData = block.empty === null ?
         null :
         this.prepareEmbeddedTemplateFn(block.empty.children, '_ForEmpty');
@@ -1473,40 +1502,42 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
   }
 
   private registerComputedLoopVariables(block: t.ForLoopBlock, bindingScope: BindingScope): void {
-    const indexLocalName = getLoopLocalName(block, '$index');
-    const countLocalName = getLoopLocalName(block, '$count');
+    const indexLocalName = block.contextVariables.$index.name;
+    const countLocalName = block.contextVariables.$count.name;
     const level = bindingScope.bindingLevel;
 
     bindingScope.set(
-        level, getLoopLocalName(block, '$odd'),
+        level, block.contextVariables.$odd.name,
         scope => scope.get(indexLocalName)!.modulo(o.literal(2)).notIdentical(o.literal(0)));
 
     bindingScope.set(
-        level, getLoopLocalName(block, '$even'),
+        level, block.contextVariables.$even.name,
         scope => scope.get(indexLocalName)!.modulo(o.literal(2)).identical(o.literal(0)));
 
     bindingScope.set(
-        level, getLoopLocalName(block, '$first'),
+        level, block.contextVariables.$first.name,
         scope => scope.get(indexLocalName)!.identical(o.literal(0)));
 
     bindingScope.set(
-        level, getLoopLocalName(block, '$last'),
+        level, block.contextVariables.$last.name,
         scope =>
             scope.get(indexLocalName)!.identical(scope.get(countLocalName)!.minus(o.literal(1))));
   }
 
   private optimizeTrackByFunction(block: t.ForLoopBlock) {
+    const indexLocalName = block.contextVariables.$index.name;
+    const itemName = block.item.name;
     const ast = block.trackBy.ast;
 
     // Top-level access of `$index` uses the built in `repeaterTrackByIndex`.
     if (ast instanceof PropertyRead && ast.receiver instanceof ImplicitReceiver &&
-        ast.name === getLoopLocalName(block, '$index')) {
+        ast.name === indexLocalName) {
       return {expression: o.importExpr(R3.repeaterTrackByIndex), usesComponentInstance: false};
     }
 
     // Top-level access of the item uses the built in `repeaterTrackByIdentity`.
     if (ast instanceof PropertyRead && ast.receiver instanceof ImplicitReceiver &&
-        ast.name === block.itemName) {
+        ast.name === itemName) {
       return {expression: o.importExpr(R3.repeaterTrackByIdentity), usesComponentInstance: false};
     }
 
@@ -1514,10 +1545,9 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
     if (ast instanceof Call && ast.receiver instanceof PropertyRead &&
         ast.receiver.receiver instanceof ImplicitReceiver && ast.args.length === 2) {
       const firstIsIndex = ast.args[0] instanceof PropertyRead &&
-          ast.args[0].receiver instanceof ImplicitReceiver &&
-          ast.args[0].name === getLoopLocalName(block, '$index');
+          ast.args[0].receiver instanceof ImplicitReceiver && ast.args[0].name === indexLocalName;
       const secondIsItem = ast.args[1] instanceof PropertyRead &&
-          ast.args[1].receiver instanceof ImplicitReceiver && ast.args[1].name === block.itemName;
+          ast.args[1].receiver instanceof ImplicitReceiver && ast.args[1].name === itemName;
 
       if (firstIsIndex && secondIsItem) {
         // If we're in the top-level component, we can access directly through `ctx`,
@@ -1542,22 +1572,23 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
       return optimizedFn;
     }
 
-    // Referencing these requires access to the context which the tracking function
-    // might not have. `$index` is special because of backwards compatibility.
-    const bannedGlobals = new Set([
-      getLoopLocalName(block, '$count'), getLoopLocalName(block, '$first'),
-      getLoopLocalName(block, '$last'), getLoopLocalName(block, '$even'),
-      getLoopLocalName(block, '$odd')
-    ]);
-    const scope = new TrackByBindingScope(
-        this._bindingScope, {
-          // Alias `$index` and the item name to `$index` and `$item` respectively.
-          // This allows us to reuse pure functions that may have different item names,
-          // but are otherwise identical.
-          [getLoopLocalName(block, '$index')]: '$index',
-          [block.itemName]: '$item',
-        },
-        bannedGlobals);
+    const contextVars = block.contextVariables;
+    const scope = new TrackByBindingScope(this._bindingScope, {
+      // Alias `$index` and the item name to `$index` and `$item` respectively.
+      // This allows us to reuse pure functions that may have different item names,
+      // but are otherwise identical.
+      [contextVars.$index.name]: '$index',
+      [block.item.name]: '$item',
+
+      // Accessing these variables in a tracking function will result in a template diagnostic.
+      // We define them as globals so that their accesses are preserved verbatim instead of being
+      // rewritten to the actual accesses.
+      [contextVars.$count.name]: contextVars.$count.name,
+      [contextVars.$first.name]: contextVars.$first.name,
+      [contextVars.$last.name]: contextVars.$last.name,
+      [contextVars.$even.name]: contextVars.$even.name,
+      [contextVars.$odd.name]: contextVars.$odd.name,
+    });
     const params = [new o.FnParam('$index'), new o.FnParam('$item')];
     const stmts = convertPureComponentScopeFunction(
         block.trackBy.ast, scope, o.variable(CONTEXT_NAME), 'track');
@@ -1574,6 +1605,7 @@ export class TemplateDefinitionBuilder implements t.Visitor<void>, LocalResolver
           stmts[stmts.length - 1] = new o.ReturnStatement(lastStatement.expr);
         }
       }
+      // This has to be a function expression, because `.bind` doesn't work on arrow functions.
       fn = o.fn(params, stmts);
     }
 
@@ -2391,26 +2423,19 @@ export class BindingScope implements LocalResolver {
 class TrackByBindingScope extends BindingScope {
   private componentAccessCount = 0;
 
-  constructor(
-      parentScope: BindingScope, private globalAliases: Record<string, string>,
-      private bannedGlobals: Set<string>) {
+  constructor(parentScope: BindingScope, private globalAliases: Record<string, string>) {
     super(parentScope.bindingLevel + 1, parentScope);
   }
 
   override get(name: string): o.Expression|null {
     let current: BindingScope|null = this.parent;
 
-    // Verify that the expression isn't trying to access a variable from a parent scope.
+    // Prevent accesses of template variables outside the `for` loop.
     while (current) {
       if (current.hasLocal(name)) {
-        this.forbiddenAccessError(name);
+        return null;
       }
       current = current.parent;
-    }
-
-    // If the variable is one of the banned globals, we have to throw.
-    if (this.bannedGlobals.has(name)) {
-      this.forbiddenAccessError(name);
     }
 
     // Intercept any aliased globals.
@@ -2426,13 +2451,6 @@ class TrackByBindingScope extends BindingScope {
   /** Gets the number of times the host component has been accessed through the scope. */
   getComponentAccessCount(): number {
     return this.componentAccessCount;
-  }
-
-  private forbiddenAccessError(propertyName: string) {
-    // TODO(crisbeto): this should be done through template type checking once it is available.
-    throw new Error(
-        `Accessing ${propertyName} inside of a track expression is not allowed. ` +
-        `Tracking expressions can only access the item, $index and properties on the containing component.`);
   }
 }
 
@@ -2910,11 +2928,6 @@ function createClosureModeGuard(): o.BinaryOperatorExpr {
   return o.typeofExpr(o.variable(NG_I18N_CLOSURE_MODE))
       .notIdentical(o.literal('undefined', o.STRING_TYPE))
       .and(o.variable(NG_I18N_CLOSURE_MODE));
-}
-
-/** Determines the name that a built in loop context variable is available under. */
-function getLoopLocalName(block: t.ForLoopBlock, name: keyof t.ForLoopBlockContext): string {
-  return block.contextVariables?.[name] || name;
 }
 
 /**
